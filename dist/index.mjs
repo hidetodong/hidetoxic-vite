@@ -9,6 +9,60 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 // src/node/cli.ts
 import cac from "cac";
 
+// src/node/pluginContainer.ts
+var createPluginContainer = (plugins) => {
+  class Context {
+    async resolve(id, importer) {
+      let out = await pluginContainer.resolveId(id, importer);
+      if (typeof out === "string")
+        out = { id: out };
+      return out;
+    }
+  }
+  const pluginContainer = {
+    async resolveId(id, importer) {
+      const ctx = new Context();
+      for (const plugin of plugins) {
+        if (plugin.resolveId) {
+          const newId = await plugin.resolveId.call(ctx, importer);
+          if (newId) {
+            id = typeof newId === "string" ? newId : newId.id;
+            return { id };
+          }
+        }
+      }
+      return null;
+    },
+    async load(id) {
+      const ctx = new Context();
+      for (const plugin of plugins) {
+        if (plugin.load) {
+          const result = await plugin.load.call(ctx, id);
+          if (result) {
+            return result;
+          }
+        }
+      }
+      return null;
+    },
+    async transform(code, id) {
+      const ctx = new Context();
+      for (const plugin of plugins) {
+        const result = await plugin.transform.call(ctx, code, id);
+        if (!result)
+          continue;
+        if (typeof result === "string") {
+          code = result;
+        } else {
+          code = result.code;
+        }
+      }
+      return { code };
+    }
+  };
+  return pluginContainer;
+};
+
 // src/node/server/index.ts
 import connect from "connect";
 import { blue, green as green2 } from "picocolors";
@@ -178,11 +232,55 @@ ${[...deps].map(green).map((item) => ` ${item}`).join("\n")}`);
   });
 }
 
+// src/node/plugins/index.ts
+function resolvePlugins() {
+  return [];
+}
+
+// src/node/server/middleware/indexHtml.ts
+import { pathExists, readFile } from "fs-extra";
+import path5 from "path";
+function indexHtmlMiddleware(serverContext) {
+  return async (req, res, next) => {
+    if (req.url === "/") {
+      const { root } = serverContext;
+      const indexHtmlPath = path5.join(root, "index.html");
+      if (await pathExists(indexHtmlPath)) {
+        const rawHtml = await readFile(indexHtmlPath, "utf8");
+        let html = rawHtml;
+        for (const plugin of serverContext.plugins) {
+          if (plugin.transformIndexHtml) {
+            html = await plugin.transformIndexHtml(html);
+          }
+        }
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/html");
+        return res.end(html);
+      }
+    }
+    return next();
+  };
+}
+
 // src/node/server/index.ts
 async function startDevServer() {
   const app = connect();
   const root = process.cwd();
   const startTime = Date.now();
+  const plugins = resolvePlugins();
+  const pluginContainer = createPluginContainer(plugins);
+  const serverContext = {
+    root: process.cwd(),
+    app,
+    pluginContainer,
+    plugins
+  };
+  for (const plugin of plugins) {
+    if (plugin.configureServer) {
+      await plugin.configureServer(serverContext);
+    }
+  }
+  app.use(indexHtmlMiddleware(serverContext));
   app.listen(3e3, async () => {
     await optimize(root);
     console.log(
