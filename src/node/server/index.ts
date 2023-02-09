@@ -36,7 +36,10 @@ export async function startDevServer(){
         }
     }
 
+    //  处理 html文件
     app.use(indexHtmlMiddleware(serverContext))
+
+    
 
     app.listen(3000,async ()=>{
 
@@ -49,4 +52,4 @@ export async function startDevServer(){
 
         console.log(`> 本地访问路径: ${blue("http://localhost:3000")}`)
     })
-}
+}   
