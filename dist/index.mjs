@@ -9,6 +9,139 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 // src/node/cli.ts
 import cac from "cac";
 
+// src/node/utils.ts
+import os from "os";
+import path2 from "path";
+
+// src/node/constants.ts
+import path from "path";
+var EXTERNAL_TYPES = [
+  "css",
+  "less",
+  "sass",
+  "scss",
+  "styl",
+  "stylus",
+  "pcss",
+  "postcss",
+  "vue",
+  "svelte",
+  "marko",
+  "astro",
+  "png",
+  "jpe?g",
+  "gif",
+  "svg",
+  "ico",
+  "webp",
+  "avif"
+];
+var BARE_IMPORT_RE = /^[\w@][^:]/;
+var PRE_BUNDLE_DIR = path.join("node_modules", ".h-vite");
+var JS_TYPES_RE = /\.(?:j|t)sx?$|\.mjs$/;
+var QUERY_RE = /\?.*$/s;
+var HASH_RE = /#.*$/s;
+var DEFAULT_EXTENSIONS = [".tsx", ".ts", ".jsx", "js"];
+var HMR_PORT = 24678;
+var CLIENT_PUBLIC_PATH = "/@vite/client";
+
+// src/node/utils.ts
+function slash(p) {
+  return p.replace(/\\/g, "/");
+}
+var isWindows = os.platform() === "win32";
+function normalizePath(id) {
+  return path2.posix.normalize(isWindows ? slash(id) : id);
+}
+function removeImportQuery(url) {
+  return url.replace(/\?import$/, "");
+}
+var isJSRequest = (id) => {
+  id = cleanUrl(id);
+  if (JS_TYPES_RE.test(id)) {
+    return true;
+  }
+  if (!path2.extname(id) && !id.endsWith("/")) {
+    return true;
+  }
+  return false;
+};
+var isCSSRequest = (id) => cleanUrl(id).endsWith(".css");
+var isImportRequest = (url) => {
+  return url.endsWith("?import");
+};
+var cleanUrl = (url) => url.replace(HASH_RE, "").replace(QUERY_RE, "");
+function getShortName(file, root) {
+  return file.startsWith(root + "/") ? path2.posix.relative(root, file) : file;
+}
+
+// src/node/ModuleGraph.ts
+var ModuleNode = class {
+  constructor(url) {
+    this.id = null;
+    this.importers = /* @__PURE__ */ new Set();
+    this.importedModules = /* @__PURE__ */ new Set();
+    this.transformResult = null;
+    this.lastHMRTimestamp = 0;
+    this.url = url;
+  }
+};
+var ModuleGraph = class {
+  constructor(resolveId) {
+    this.resolveId = resolveId;
+    this.urlToModuleMap = /* @__PURE__ */ new Map();
+    this.idToModuleMap = /* @__PURE__ */ new Map();
+  }
+  getModuleById(id) {
+    return this.idToModuleMap.get(id);
+  }
+  async getModuleByUrl(rawUrl) {
+    const { url } = await this._resolve(rawUrl);
+    return this.urlToModuleMap.get(url);
+  }
+  async ensureEntryFromUrl(rawUrl) {
+    const { url, resolvedId } = await this._resolve(rawUrl);
+    if (this.urlToModuleMap.has(url)) {
+      return this.urlToModuleMap.get(url);
+    }
+    const mod = new ModuleNode(url);
+    mod.id = resolvedId;
+    this.urlToModuleMap.set(url, mod);
+    this.idToModuleMap.set(resolvedId, mod);
+    return mod;
+  }
+  async updateModuleInfo(mod, importedModules) {
+    const prevImports = mod.importedModules;
+    for (const curImports of importedModules) {
+      const dep = typeof curImports === "string" ? await this.ensureEntryFromUrl(cleanUrl(curImports)) : curImports;
+      if (dep) {
+        mod.importedModules.add(dep);
+        dep.importers.add(mod);
+      }
+    }
+    for (const prevImport of prevImports) {
+      if (!importedModules.has(prevImport.url)) {
+        prevImport.importers.delete(mod);
+      }
+    }
+  }
+  invalidateModule(file) {
+    const mod = this.idToModuleMap.get(file);
+    if (mod) {
+      mod.lastHMRTimestamp = Date.now();
+      mod.transformResult = null;
+      mod.importers.forEach((importer) => {
+        this.invalidateModule(importer.id);
+      });
+    }
+  }
+  async _resolve(url) {
+    const resolved = await this.resolveId(url);
+    const resolvedId = resolved?.id || url;
+    return { url, resolvedId };
+  }
+};
+
 // src/node/pluginContainer.ts
 var createPluginContainer = (plugins) => {
   class Context {
@@ -67,42 +200,13 @@ var createPluginContainer = (plugins) => {
 
 // src/node/server/index.ts
 import connect from "connect";
-import { blue, green as green2 } from "picocolors";
+import chokidar from "chokidar";
+import { blue as blue2, green as green3 } from "picocolors";
 
 // src/node/optimizer/index.ts
 import path4 from "path";
 import { build } from "esbuild";
 import { green } from "picocolors";
-
-// src/node/constants.ts
-import path from "path";
-var EXTERNAL_TYPES = [
-  "css",
-  "less",
-  "sass",
-  "scss",
-  "styl",
-  "stylus",
-  "pcss",
-  "postcss",
-  "vue",
-  "svelte",
-  "marko",
-  "astro",
-  "png",
-  "jpe?g",
-  "gif",
-  "svg",
-  "ico",
-  "webp",
-  "avif"
-];
-var BARE_IMPORT_RE = /^[\w@][^:]/;
-var PRE_BUNDLE_DIR = path.join("node_modules", ".h-vite");
-var JS_TYPES_RE = /\.(?:j|t)sx?$|\.mjs$/;
-var QUERY_RE = /\?.*$/s;
-var HASH_RE = /#.*$/s;
-var DEFAULT_EXTENSIONS = [".tsx", ".ts", ".jsx", "js"];
 
 // src/node/optimizer/scanPlugin.ts
 function scanPlugin(deps) {
@@ -141,30 +245,6 @@ import path3 from "path";
 import resolve from "resolve";
 import fs from "fs-extra";
 import createDebug from "debug";
-
-// src/node/utils.ts
-import os from "os";
-import path2 from "path";
-function slash(p) {
-  return p.replace(/\\/g, "/");
-}
-var isWindows = os.platform() === "win32";
-function normalizePath(id) {
-  return path2.posix.normalize(isWindows ? slash(id) : id);
-}
-var isJSRequest = (id) => {
-  id = cleanUrl(id);
-  if (JS_TYPES_RE.test(id)) {
-    return true;
-  }
-  if (!path2.extname(id) && !id.endsWith("/")) {
-    return true;
-  }
-  return false;
-};
-var cleanUrl = (url) => url.replace(HASH_RE, "").replace(QUERY_RE, "");
-
-// src/node/optimizer/preBundlePlugin.ts
 var debug = createDebug("dev");
 function preBundlePlugin(deps) {
   return {
@@ -249,9 +329,98 @@ ${[...deps].map(green).map((item) => ` ${item}`).join("\n")}`);
   });
 }
 
-// src/node/plugins/esbuild.ts
-import { readFile } from "fs-extra";
+// src/node/plugins/assets.ts
+function assetsPlugin() {
+  let sc;
+  return {
+    name: "h-vite:assets",
+    configureServer(s) {
+      sc = s;
+    },
+    async load(id) {
+      const cleanedId = removeImportQuery(cleanUrl(id));
+      const resolvedId = `/${getShortName(normalizePath(id), sc.root)}`;
+      if (cleanedId.endsWith(".svg")) {
+        return {
+          code: `export default "${resolvedId}"`
+        };
+      }
+    }
+  };
+}
+
+// src/node/plugins/clientInject.ts
+import fs2 from "fs-extra";
 import path5 from "path";
+function clientInjectPlugin() {
+  let serverContext;
+  return {
+    name: "h-vite:client-inject",
+    configureServer(s) {
+      serverContext = s;
+    },
+    resolveId(id) {
+      if (id === CLIENT_PUBLIC_PATH) {
+        return { id };
+      }
+      return null;
+    },
+    async load(id) {
+      if (id === CLIENT_PUBLIC_PATH) {
+        const realPath = path5.join(
+          serverContext.root,
+          "node_modules",
+          "hidetoxic-vite",
+          "dist",
+          "client.mjs"
+        );
+        const code = await fs2.readFile(realPath, "utf-8");
+        return {
+          code: code.replace("__HMR_PORT__", JSON.stringify(HMR_PORT))
+        };
+      }
+    },
+    transformIndexHtml(raw) {
+      return raw.replace(
+        /(<head[^>]*>)/i,
+        `$1<script type="module" src="${CLIENT_PUBLIC_PATH}"><\/script>`
+      );
+    }
+  };
+}
+
+// src/node/plugins/css.ts
+import { readFile } from "fs-extra";
+function cssPlugin() {
+  return {
+    name: "h-vite:css",
+    load(id) {
+      if (id.endsWith(".css")) {
+        return readFile(id, "utf-8");
+      }
+    },
+    async transform(code, id) {
+      if (id.endsWith(".css")) {
+        const jsContent = `
+  const css = "${code.replace(/\n/g, "")}";
+  const style = document.createElement("style");
+  style.setAttribute("type", "text/css");
+  style.innerHTML = css;
+  document.head.appendChild(style);
+  export default css;
+  `.trim();
+        return {
+          code: jsContent
+        };
+      }
+      return null;
+    }
+  };
+}
+
+// src/node/plugins/esbuild.ts
+import { readFile as readFile2 } from "fs-extra";
+import path6 from "path";
 import esbuild from "esbuild";
 function esbuildTransformPlugin() {
   return {
@@ -259,7 +428,7 @@ function esbuildTransformPlugin() {
     async load(id) {
       if (isJSRequest(id)) {
         try {
-          const code = await readFile(id, "utf-8");
+          const code = await readFile2(id, "utf-8");
           return code;
         } catch (error) {
           return null;
@@ -268,7 +437,7 @@ function esbuildTransformPlugin() {
     },
     async transform(code, id) {
       if (isJSRequest(id)) {
-        const extname = path5.extname(id).slice(1);
+        const extname = path6.extname(id).slice(1);
         const { code: tranformedCode, map } = await esbuild.transform(code, {
           target: "esnext",
           format: "esm",
@@ -288,7 +457,7 @@ function esbuildTransformPlugin() {
 // src/node/plugins/importAnalysis.ts
 import { init as init2, parse as parse2 } from "es-module-lexer";
 import MagicString from "magic-string";
-import path6 from "path";
+import path7 from "path";
 function importAnalysisPlugin() {
   let serverContext;
   return {
@@ -297,6 +466,9 @@ function importAnalysisPlugin() {
       serverContext = s;
     },
     async transform(code, id) {
+      const { moduleGraph } = serverContext;
+      const curMod = moduleGraph.getModuleById(id);
+      const importedModules = /* @__PURE__ */ new Set();
       if (!isJSRequest(id)) {
         return null;
       }
@@ -307,18 +479,26 @@ function importAnalysisPlugin() {
         const { s: modStart, e: modEnd, n: modSource } = importInfo;
         if (!modSource)
           continue;
+        if (modSource.endsWith(".svg")) {
+          const resolvedUrl = path7.join(path7.dirname(id), modSource);
+          ms.overwrite(modStart, modEnd, `${resolvedUrl}?import`);
+          continue;
+        }
         if (BARE_IMPORT_RE.test(modSource)) {
           const bundlePath = normalizePath(
-            path6.join("/", PRE_BUNDLE_DIR, `${modSource}.js`)
+            path7.join("/", PRE_BUNDLE_DIR, `${modSource}.js`)
           );
           ms.overwrite(modStart, modEnd, bundlePath);
+          importedModules.add(bundlePath);
         } else if (modSource.startsWith(".") || modSource.startsWith("/")) {
           const resolved = await this.resolve(modSource, id);
           if (resolved) {
             ms.overwrite(modStart, modEnd, resolved.id);
+            importedModules.add(resolved);
           }
         }
       }
+      moduleGraph.updateModuleInfo(curMod, importedModules);
       return {
         code: ms.toString(),
         map: ms.generateMap()
@@ -328,7 +508,7 @@ function importAnalysisPlugin() {
 }
 
 // src/node/plugins/resolve.ts
-import path7 from "path";
+import path8 from "path";
 import { pathExists } from "fs-extra";
 import resolve2 from "resolve";
 function resolvePlugin() {
@@ -339,11 +519,11 @@ function resolvePlugin() {
       serverContext = s;
     },
     async resolveId(id, importer) {
-      if (path7.isAbsolute(id)) {
+      if (path8.isAbsolute(id)) {
         if (await pathExists(id)) {
           return { id };
         }
-        id = path7.join(serverContext.root, id);
+        id = path8.join(serverContext.root, id);
         if (await pathExists(id)) {
           return { id };
         }
@@ -351,11 +531,11 @@ function resolvePlugin() {
         if (!importer) {
           throw new Error("fuck");
         }
-        const hasExtension = path7.extname(id).length > 1;
+        const hasExtension = path8.extname(id).length > 1;
         let resolvedId;
         if (hasExtension) {
           resolvedId = normalizePath(
-            resolve2.sync(id, { basedir: path7.dirname(importer) })
+            resolve2.sync(id, { basedir: path8.dirname(importer) })
           );
           if (await pathExists(resolvedId)) {
             return { id: resolvedId };
@@ -365,7 +545,7 @@ function resolvePlugin() {
             try {
               const withExtension = `${id}${extname}`;
               resolvedId = normalizePath(
-                resolve2.sync(withExtension, { basedir: path7.dirname(importer) })
+                resolve2.sync(withExtension, { basedir: path8.dirname(importer) })
               );
               if (await pathExists(resolvedId)) {
                 return { id: resolvedId };
@@ -383,19 +563,26 @@ function resolvePlugin() {
 
 // src/node/plugins/index.ts
 function resolvePlugins() {
-  return [resolvePlugin(), esbuildTransformPlugin(), importAnalysisPlugin()];
+  return [
+    clientInjectPlugin(),
+    resolvePlugin(),
+    esbuildTransformPlugin(),
+    importAnalysisPlugin(),
+    cssPlugin(),
+    assetsPlugin()
+  ];
 }
 
 // src/node/server/middleware/indexHtml.ts
-import { pathExists as pathExists2, readFile as readFile2 } from "fs-extra";
-import path8 from "path";
+import { pathExists as pathExists2, readFile as readFile3 } from "fs-extra";
+import path9 from "path";
 function indexHtmlMiddleware(serverContext) {
   return async (req, res, next) => {
     if (req.url === "/") {
       const { root } = serverContext;
-      const indexHtmlPath = path8.join(root, "index.html");
+      const indexHtmlPath = path9.join(root, "index.html");
       if (await pathExists2(indexHtmlPath)) {
-        const rawHtml = await readFile2(indexHtmlPath, "utf8");
+        const rawHtml = await readFile3(indexHtmlPath, "utf8");
         let html = rawHtml;
         for (const plugin of serverContext.plugins) {
           if (plugin.transformIndexHtml) {
@@ -415,8 +602,12 @@ function indexHtmlMiddleware(serverContext) {
 import createDebug2 from "debug";
 var debug2 = createDebug2("dev");
 async function transformRequest(url, serverContext) {
-  const { pluginContainer } = serverContext;
+  const { pluginContainer, moduleGraph } = serverContext;
   url = cleanUrl(url);
+  let mod = await moduleGraph.getModuleByUrl(url);
+  if (mod && mod.transformResult) {
+    return mod.transformResult;
+  }
   const resolvedResult = await pluginContainer.resolveId(url);
   let transformResult;
   if (resolvedResult?.id) {
@@ -424,11 +615,15 @@ async function transformRequest(url, serverContext) {
     if (typeof code === "object" && code !== null) {
       code = code.code;
     }
+    mod = await moduleGraph.ensureEntryFromUrl(url);
     if (code) {
       transformResult = await pluginContainer.transform(
         code,
         resolvedResult?.id
       );
+    }
+    if (mod) {
+      mod.transformResult = transformResult;
     }
   }
   return transformResult;
@@ -440,7 +635,7 @@ function transformMiddleware(serverContext) {
     }
     const url = req.url;
     debug2("transformMiddleware: %s", url);
-    if (isJSRequest(url)) {
+    if (isJSRequest(url) || isCSSRequest(url) || isImportRequest(url)) {
       let result = await transformRequest(url, serverContext);
       let final;
       if (!result) {
@@ -457,19 +652,96 @@ function transformMiddleware(serverContext) {
   };
 }
 
+// src/node/server/middleware/static.ts
+import sirv from "sirv";
+function staticMiddleware(root) {
+  const serverFromRoot = sirv(root, { dev: true });
+  return async (req, res, next) => {
+    if (!req.url) {
+      return;
+    }
+    if (isImportRequest(req.url)) {
+      return;
+    }
+    serverFromRoot(req, res, next);
+  };
+}
+
+// src/node/ws.ts
+import { red } from "picocolors";
+import { WebSocketServer, WebSocket } from "ws";
+function createWebSocketServer(server) {
+  let wss;
+  wss = new WebSocketServer({ port: HMR_PORT });
+  wss.on("connection", (socket) => {
+    socket.send(JSON.stringify({ type: "connected" }));
+  });
+  wss.on("error", (e) => {
+    if (e.code !== "EADDRINUSE") {
+      console.error(red(`WebSocket server error:
+${e.stack || e.message}`));
+    }
+  });
+  return {
+    send(payload) {
+      const stringified = JSON.stringify(payload);
+      wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(stringified);
+        }
+      });
+    },
+    close() {
+      wss.close();
+    }
+  };
+}
+
+// src/node/hmr.ts
+import { blue, green as green2 } from "picocolors";
+function bindingHMREvents(serverContext) {
+  const { watcher, ws, root } = serverContext;
+  watcher.on("change", async (file) => {
+    console.log(`\u2728${blue("[hmr]")} ${green2(file)} changed`);
+    const { moduleGraph } = serverContext;
+    await moduleGraph.invalidateModule(file);
+    ws.send({
+      type: "update",
+      updates: [
+        {
+          type: "js-update",
+          timestamp: Date.now(),
+          path: "/" + getShortName(file, root),
+          acceptedPath: "/" + getShortName(file, root)
+        }
+      ]
+    });
+  });
+}
+
 // src/node/server/index.ts
 async function startDevServer() {
   const app = connect();
+  const ws = createWebSocketServer(app);
   const root = process.cwd();
-  const startTime = Date.now();
+  const watcher = chokidar.watch(root, {
+    ignored: ["**/node_modules/**", "**/.git/**"],
+    ignoreInitial: true
+  });
   const plugins = resolvePlugins();
+  const moduleGraph = new ModuleGraph((url) => pluginContainer.resolveId(url));
   const pluginContainer = createPluginContainer(plugins);
+  const startTime = Date.now();
   const serverContext = {
     root: process.cwd(),
     app,
     pluginContainer,
-    plugins
+    plugins,
+    moduleGraph,
+    ws,
+    watcher
   };
+  bindingHMREvents(serverContext);
   for (const plugin of plugins) {
     if (plugin.configureServer) {
       await plugin.configureServer(serverContext);
@@ -477,13 +749,14 @@ async function startDevServer() {
   }
   app.use(indexHtmlMiddleware(serverContext));
   app.use(transformMiddleware(serverContext));
+  app.use(staticMiddleware(serverContext.root));
   app.listen(3e3, async () => {
     await optimize(root);
     console.log(
-      green2("\u{1F680}HIDETOXIC-VITE \u5DF2\u542F\u52A8"),
+      green3("\u{1F680}Server \u5DF2\u542F\u52A8"),
       `\u603B\u65F6\u95F4${Date.now() - startTime}ms`
     );
-    console.log(`> \u672C\u5730\u8BBF\u95EE\u8DEF\u5F84: ${blue("http://localhost:3000")}`);
+    console.log(`> \u672C\u5730\u8BBF\u95EE\u8DEF\u5F84: ${blue2("http://localhost:3000")}`);
   });
 }
 
